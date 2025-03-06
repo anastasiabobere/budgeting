@@ -2,6 +2,10 @@ import sqlite3
 import tkinter as tk
 from tkinter import messagebox, ttk
 from flask import Flask, request, jsonify
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import threading
+import requests
 
 # Database Setup
 def init_db():
@@ -38,6 +42,32 @@ def get_transactions():
     conn.close()
     return jsonify(data)
 
+@app.route("/api/summary", methods=["GET"])
+def get_summary():
+    user_id = request.args.get("user_id")
+    if not user_id:
+        return jsonify({"error": "User ID required"}), 400
+    
+    conn = sqlite3.connect("budget.db")
+    c = conn.cursor()
+    
+    c.execute("SELECT SUM(amount) FROM transactions WHERE user_id = ? AND type = 'income'", (user_id,))
+    total_income = c.fetchone()[0] or 0
+    
+    c.execute("SELECT SUM(amount) FROM transactions WHERE user_id = ? AND type = 'expense'", (user_id,))
+    total_expense = c.fetchone()[0] or 0
+    
+    c.execute("SELECT type, amount, description FROM transactions WHERE user_id = ? ORDER BY id DESC LIMIT 5", (user_id,))
+    recent_transactions = c.fetchall()
+    
+    conn.close()
+    
+    return jsonify({
+        "total_income": total_income,
+        "total_expense": total_expense,
+        "recent_transactions": recent_transactions
+    })
+
 # GUI Application
 class BudgetApp:
     def __init__(self, root):
@@ -46,7 +76,6 @@ class BudgetApp:
         self.root.geometry("800x600")
         self.root.configure(bg='#f0f0f0')
         
-        # Configure styles
         self.style = ttk.Style()
         self.style.theme_use('clam')
         self.style.configure('TButton', font=('Arial', 12), padding=5)
@@ -58,19 +87,15 @@ class BudgetApp:
         self.create_login_widgets()
 
     def create_login_widgets(self):
-        # Clear existing widgets
         for widget in self.root.winfo_children():
             widget.destroy()
         
-        # Login Frame
         login_frame = tk.Frame(self.root, bg='#f0f0f0')
         login_frame.pack(expand=True, fill=tk.BOTH, padx=50, pady=50)
         
-        # Title
         tk.Label(login_frame, text="Budget App", font=('Arial', 24, 'bold'), 
                 bg='#f0f0f0', fg='#333').pack(pady=20)
         
-        # Login Form
         form_frame = tk.Frame(login_frame, bg='#f0f0f0')
         form_frame.pack(pady=20)
         
@@ -82,7 +107,6 @@ class BudgetApp:
         tk.Entry(form_frame, textvariable=self.password_var, show="*", 
                 font=('Arial', 12), width=25).grid(row=1, column=1, padx=10, pady=5)
         
-        # Buttons
         btn_frame = tk.Frame(login_frame, bg='#f0f0f0')
         btn_frame.pack(pady=20)
         
@@ -119,15 +143,12 @@ class BudgetApp:
             messagebox.showerror("Error", "Invalid credentials")
     
     def open_budget_window(self):
-        # Clear existing widgets
         for widget in self.root.winfo_children():
             widget.destroy()
         
-        # Main container
         main_frame = tk.Frame(self.root, bg='#f0f0f0')
         main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
         
-        # Transaction Input
         input_frame = tk.Frame(main_frame, bg='#f0f0f0')
         input_frame.pack(fill=tk.X, pady=10)
         
@@ -148,14 +169,13 @@ class BudgetApp:
         tk.Button(btn_frame, text="Add Expense", command=lambda: self.add_transaction("expense"),
                  bg='#dc3545', fg='white', font=('Arial', 12)).pack(side=tk.LEFT, padx=5)
         
-        # Transactions Treeview
         tree_frame = tk.Frame(main_frame, bg='#f0f0f0')
         tree_frame.pack(fill=tk.BOTH, expand=True)
         
         self.transactions_tree = ttk.Treeview(tree_frame, columns=("Type", "Amount", "Description"), show="headings")
-        self.transactions_tree.heading("Type", text="Type")
-        self.transactions_tree.heading("Amount", text="Amount ($)")
-        self.transactions_tree.heading("Description", text="Description")
+        self.transactions_tree.heading("Type", text="Type ↓", command=lambda: self.sort_treeview("Type", False))
+        self.transactions_tree.heading("Amount", text="Amount ↓", command=lambda: self.sort_treeview("Amount", False))
+        self.transactions_tree.heading("Description", text="Description ↓", command=lambda: self.sort_treeview("Description", False))
         self.transactions_tree.column("Type", width=100, anchor=tk.CENTER)
         self.transactions_tree.column("Amount", width=150, anchor=tk.CENTER)
         self.transactions_tree.column("Description", width=300, anchor=tk.W)
@@ -163,7 +183,6 @@ class BudgetApp:
         self.transactions_tree.tag_configure('expense', background='#f8d7da')
         self.transactions_tree.pack(fill=tk.BOTH, expand=True)
         
-        # Summary Section
         summary_frame = tk.Frame(main_frame, bg='#ffffff', bd=1, relief=tk.SOLID)
         summary_frame.pack(fill=tk.X, pady=20, padx=10)
         
@@ -182,12 +201,13 @@ class BudgetApp:
         self.balance_label = tk.Label(summary_frame, text="$0.00", font=('Arial', 12, 'bold'), bg='#ffffff')
         self.balance_label.grid(row=2, column=1, padx=10, pady=5, sticky=tk.W)
         
-        # Logout Button
+        tk.Button(main_frame, text="View Budget Analysis", command=self.show_analysis,
+                 font=('Arial', 12), bg='#17a2b8', fg='white').pack(pady=10)
         tk.Button(main_frame, text="Logout", command=self.logout, 
                  font=('Arial', 12), bg='#6c757d', fg='white').pack(pady=10)
         
         self.load_transactions()
-    
+
     def add_transaction(self, trans_type):
         amount = self.amount_var.get()
         description = self.desc_var.get()
@@ -231,11 +251,68 @@ class BudgetApp:
         self.balance_label.config(text=f"${balance:.2f}")
         self.balance_label.config(fg='#28a745' if balance >= 0 else '#dc3545')
     
+    def sort_treeview(self, col, reverse):
+        l = [(self.transactions_tree.set(k, col), k) for k in self.transactions_tree.get_children('')]
+        
+        try:
+            if col == "Amount":
+                l.sort(key=lambda t: float(t[0]), reverse=reverse)
+            else:
+                l.sort(reverse=reverse)
+        except:
+            pass
+        
+        for index, (val, k) in enumerate(l):
+            self.transactions_tree.move(k, '', index)
+            
+        self.transactions_tree.heading(col, 
+            text=f"{col} {'↑' if reverse else '↓'}",
+            command=lambda: self.sort_treeview(col, not reverse))
+
+    def show_analysis(self):
+        analysis_win = tk.Toplevel(self.root)
+        analysis_win.title("Budget Analysis")
+        analysis_win.geometry("800x600")
+        
+        try:
+            response = requests.get(f"http://localhost:5000/api/summary?user_id={self.user_id}")
+            data = response.json()
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to fetch analysis data: {str(e)}")
+            return
+        
+        fig = plt.Figure(figsize=(8, 6), dpi=100)
+        
+        ax1 = fig.add_subplot(121)
+        ax1.set_title("Income vs Expenses")
+        labels = ['Income', 'Expenses']
+        sizes = [data['total_income'], data['total_expense']]
+        ax1.pie(sizes, labels=labels, autopct='%1.1f%%', colors=['#28a745', '#dc3545'])
+        
+        ax2 = fig.add_subplot(122)
+        ax2.set_title("Recent Transactions")
+        transactions = data['recent_transactions'][::-1]
+        amounts = [t[1] for t in transactions]
+        labels = [t[2][:15] + '...' if len(t[2]) > 15 else t[2] for t in transactions]
+        colors = ['#28a745' if t[0] == 'income' else '#dc3545' for t in transactions]
+        ax2.barh(labels, amounts, color=colors)
+        ax2.invert_yaxis()
+        
+        canvas = FigureCanvasTkAgg(fig, master=analysis_win)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
     def logout(self):
         self.user_id = None
         self.create_login_widgets()
 
+def run_flask():
+    app.run(threaded=True)
+
 if __name__ == "__main__":
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    
     root = tk.Tk()
     app = BudgetApp(root)
     root.mainloop()
